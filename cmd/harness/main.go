@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"harness/internal/evaluator"
+	"harness/internal/memory"
 	"harness/internal/model"
 	"harness/internal/service"
 	"harness/internal/store"
@@ -35,6 +36,10 @@ func main() {
 		handleStrategy(svc, os.Args[2:])
 	case "iterate":
 		handleIterate(svc, os.Args[2:])
+	case "optimize":
+		handleOptimize(svc, os.Args[2:])
+	case "learn":
+		handleLearn(svc, os.Args[2:])
 	default:
 		printUsage()
 	}
@@ -56,6 +61,9 @@ Usage:
   harness convergence                              检查所有迭代链收敛状态
   harness strategy <prompt_id>                     建议下一步策略升级
   harness iterate <run_id>                         查看迭代链
+
+  harness optimize <prompt_id>                     Prompt分块+BadCase归因+多策略优化
+  harness learn <run_id>                           从执行记录提取技能/轨迹
 
 Flags:
   --json    结构化 JSON 输出`)
@@ -317,4 +325,66 @@ func truncate(s string, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+func handleOptimize(svc *service.HarnessService, args []string) {
+	if len(args) < 1 {
+		fmt.Println("用法: harness optimize <prompt_id>")
+		return
+	}
+	candidates, attributions, err := svc.OptimizePrompt(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return
+	}
+
+	fmt.Println("=== Bad Case 归因 ===")
+	for _, a := range attributions {
+		fmt.Printf("  区块%d: %s\n", a.SectionID, a.Reason)
+		fmt.Printf("    期望: %s\n", a.Expectation)
+	}
+
+	fmt.Println("\n=== 优化候选 ===")
+	for i, c := range candidates {
+		fmt.Printf("  候选%d: 区块%d 策略=%s\n", i+1, c.SectionID, c.Strategy)
+		fmt.Printf("    内容: %s\n", truncate(c.Content, 120))
+	}
+}
+
+func handleLearn(svc *service.HarnessService, args []string) {
+	if len(args) < 1 {
+		fmt.Println("用法: harness learn <run_id>")
+		return
+	}
+
+	shouldLearn, err := svc.ShouldLearn(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return
+	}
+	fmt.Printf("是否触发学习: %v\n", shouldLearn)
+
+	skill, trajectory, err := svc.ExtractSkillFromRun(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\n=== 轨迹萃取 ===\n")
+	fmt.Printf("任务: %s\n", trajectory.Run.Task)
+	fmt.Printf("结果: %s\n", trajectory.Outcome)
+	for _, step := range trajectory.Steps {
+		fmt.Printf("  [%s] %s (success=%v)\n", step.Action, truncate(step.Result, 80), step.Success)
+	}
+
+	fmt.Printf("\n=== 提取技能 ===\n")
+	fmt.Printf("名称: %s\n", skill.Name)
+	fmt.Printf("触发词: %v\n", skill.TriggerWords)
+	fmt.Printf("成功率: %.0f%%\n", skill.SuccessRate*100)
+	fmt.Printf("版本: %d\n", skill.Version)
+	fmt.Printf("步骤数: %d\n", len(skill.Steps))
+
+	if memory.ShouldDisableSkill(3) {
+		fmt.Println("\n⚠️  连续3次失败，技能将被自动禁用（优胜劣汰）")
+	}
 }

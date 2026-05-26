@@ -3,7 +3,9 @@ package service
 import (
 	"fmt"
 	"harness/internal/evaluator"
+	"harness/internal/memory"
 	"harness/internal/model"
+	"harness/internal/optimizer"
 	"harness/internal/store"
 )
 
@@ -177,4 +179,59 @@ func (svc *HarnessService) IterateChain(runID string) ([]model.Run, error) {
 	}
 
 	return chain, nil
+}
+
+func (svc *HarnessService) OptimizePrompt(promptID string) ([]optimizer.OptimizationCandidate, []optimizer.BadCaseAttribution, error) {
+	prompt, err := svc.store.GetPrompt(promptID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	runs, err := svc.store.FindRunsByPrompt(promptID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sections := optimizer.SplitPrompt(prompt.Template)
+
+	var allAttributions []optimizer.BadCaseAttribution
+	for _, r := range runs {
+		if r.Status == "partial" || r.Status == "fail" {
+			attributions := optimizer.AttributeBadCase(sections, &r)
+			allAttributions = append(allAttributions, attributions...)
+		}
+	}
+
+	currentLevel := model.StrategyLevel(prompt.StrategyLevel)
+	if currentLevel == "" {
+		currentLevel = model.Basic
+	}
+	candidates := optimizer.GenerateOptimizations(sections, allAttributions, currentLevel)
+
+	return candidates, allAttributions, nil
+}
+
+func (svc *HarnessService) ExtractSkillFromRun(runID string) (*memory.ExtractedSkill, *memory.Trajectory, error) {
+	run, err := svc.store.GetRun(runID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	prompt, err := svc.store.GetPrompt(run.PromptID)
+	if err != nil {
+		prompt = &model.Prompt{}
+	}
+
+	trajectory := memory.ExtractTrajectory(run, prompt)
+	skill := memory.ExtractSkill(trajectory)
+
+	return skill, trajectory, nil
+}
+
+func (svc *HarnessService) ShouldLearn(runID string) (bool, error) {
+	run, err := svc.store.GetRun(runID)
+	if err != nil {
+		return false, err
+	}
+	return memory.ShouldTriggerLearning(run), nil
 }
